@@ -5,8 +5,8 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains import create_retrieval_chain
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,7 +22,7 @@ Use the following context to answer the question accurately and warmly. If the a
 Context:
 {context}
 
-Input: {input}
+Question: {question}
 
 Answer:"""
 
@@ -47,45 +47,39 @@ def load_chain():
     )
     prompt = PromptTemplate(
         template=PROMPT_TEMPLATE,
-        input_variables=["context", "input"]
+        input_variables=["context", "question"]
     )
-    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
-    chain = create_retrieval_chain(retriever, combine_docs_chain)
-    return chain
+
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    chain = (
+        {"context": retriever | format_docs, "question": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+    return chain, retriever
 
 st.set_page_config(page_title="NayePankh Chatbot", page_icon="🕊️", layout="centered")
 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&family=Poppins:wght@400;500;600&display=swap');
-
 html, body, [class*="css"] { font-family: 'Poppins', sans-serif; }
-
 .stApp { background: linear-gradient(135deg, #FFF9F0 0%, #F0F8FF 50%, #F5FFF0 100%); }
-
-.hero {
-    background: linear-gradient(135deg, #FF6B6B, #FF8E53, #FFC107);
-    border-radius: 24px;
-    padding: 32px 28px;
-    text-align: center;
-    margin-bottom: 20px;
-    box-shadow: 0 8px 32px rgba(255,107,107,0.25);
-}
+.hero { background: linear-gradient(135deg, #FF6B6B, #FF8E53, #FFC107); border-radius: 24px; padding: 32px 28px; text-align: center; margin-bottom: 20px; box-shadow: 0 8px 32px rgba(255,107,107,0.25); }
 .hero h1 { font-family:'Nunito',sans-serif; font-size:1.9rem; font-weight:800; color:white; margin:0 0 6px 0; }
 .hero p { color:rgba(255,255,255,0.92); font-size:0.95rem; margin:0; }
-
 .stats-bar { display:flex; justify-content:center; gap:10px; margin-bottom:20px; flex-wrap:wrap; }
 .stat-chip { background:white; border-radius:50px; padding:7px 16px; font-size:0.82rem; font-weight:600; box-shadow:0 2px 12px rgba(0,0,0,0.08); display:inline-flex; align-items:center; gap:5px; }
 .chip-orange { border:2px solid #FF8E53; color:#D4500A; }
-.chip-blue   { border:2px solid #4ECDC4; color:#0A7A73; }
-.chip-green  { border:2px solid #6BCB77; color:#1A7A27; }
+.chip-blue { border:2px solid #4ECDC4; color:#0A7A73; }
+.chip-green { border:2px solid #6BCB77; color:#1A7A27; }
 .chip-purple { border:2px solid #A78BFA; color:#5B21B6; }
-
 .section-label { font-size:0.78rem; font-weight:700; color:#888; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:10px; }
-
 .source-card { background:linear-gradient(135deg,#FFF9F0,#FFF3E0); border:1.5px solid #FFD4A3; border-radius:10px; padding:10px 14px; margin-top:6px; font-size:0.78rem; color:#8B4513; line-height:1.5; }
 .source-label { font-weight:700; color:#D4500A; display:block; margin-bottom:4px; font-size:0.75rem; }
-
 .footer { text-align:center; color:#aaa; font-size:0.75rem; margin-top:8px; padding:12px; }
 .footer a { color:#FF8E53; text-decoration:none; }
 </style>
@@ -154,10 +148,10 @@ if question:
         placeholder = st.empty()
         placeholder.markdown("🔍 *Searching knowledge base...*")
         try:
-            chain = load_chain()
-            result = chain.invoke({"input": question})
-            answer = result["answer"]
-            sources = [doc.page_content for doc in result.get("context", [])]
+            chain, retriever = load_chain()
+            docs = retriever.invoke(question)
+            sources = [doc.page_content for doc in docs]
+            answer = chain.invoke(question)
 
             placeholder.empty()
             typed = ""
