@@ -4,9 +4,10 @@ import streamlit as st
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_groq import ChatGroq
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import HumanMessage, AIMessage
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,19 +16,8 @@ VECTORSTORE_DIR = "vectorstore"
 EMBED_MODEL     = "all-MiniLM-L6-v2"
 GROQ_MODEL      = "llama-3.1-8b-instant"
 
-PROMPT_TEMPLATE = """You are a helpful and warm assistant for NayePankh Foundation, a registered Indian NGO that uplifts underprivileged people through food, clothes, sanitary pads, and education.
-
-Use the following context to answer the question accurately and warmly. If the answer is not in the context, say "I don't have that information - please contact NayePankh at contact@nayepankh.com or call +91-8318500748."
-
-Context:
-{context}
-
-Question: {question}
-
-Answer:"""
-
 @st.cache_resource(show_spinner=False)
-def load_chain():
+def load_retriever():
     embeddings = HuggingFaceEmbeddings(
         model_name=EMBED_MODEL,
         model_kwargs={"device": "cpu"}
@@ -36,30 +26,56 @@ def load_chain():
         persist_directory=VECTORSTORE_DIR,
         embedding_function=embeddings
     )
-    retriever = vectorstore.as_retriever(
+    return vectorstore.as_retriever(
         search_type="similarity",
         search_kwargs={"k": 4}
     )
-    llm = ChatGroq(
+
+@st.cache_resource(show_spinner=False)
+def load_llm():
+    return ChatGroq(
         model=GROQ_MODEL,
         api_key=os.getenv("GROQ_API_KEY"),
         temperature=0.3
     )
-    prompt = PromptTemplate(
-        template=PROMPT_TEMPLATE,
-        input_variables=["context", "question"]
-    )
 
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
 
-    chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-    return chain, retriever
+def get_answer(question, chat_history):
+    retriever = load_retriever()
+    llm = load_llm()
+
+    # Retrieve relevant docs
+    docs = retriever.invoke(question)
+    context = format_docs(docs)
+    sources = [doc.page_content for doc in docs]
+
+    # Build prompt with memory
+    system_prompt = """You are a helpful and warm assistant for NayePankh Foundation, a registered Indian NGO that uplifts underprivileged people through food, clothes, sanitary pads, and education.
+
+Use the following context from NayePankh's knowledge base to answer the user's question. You also have access to the previous conversation history to handle follow-up questions naturally.
+
+If the answer is not in the context, say "I don't have that information - please contact NayePankh at contact@nayepankh.com or call +91-8318500748."
+
+Context:
+{context}"""
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{question}")
+    ])
+
+    chain = prompt | llm | StrOutputParser()
+
+    answer = chain.invoke({
+        "context": context,
+        "chat_history": chat_history,
+        "question": question
+    })
+
+    return answer, sources
 
 st.set_page_config(page_title="NayePankh Chatbot", page_icon="🕊️", layout="centered")
 
@@ -98,8 +114,11 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# Session state
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+    st.session_state.chat_history = []      # for display
+if "lc_history" not in st.session_state:
+    st.session_state.lc_history = []        # for LangChain memory
 
 SUGGESTIONS = [
     ("🤝", "What does NayePankh do?"),
@@ -119,6 +138,7 @@ if not st.session_state.chat_history:
             st.session_state.quick_question = q
     st.markdown("<br>", unsafe_allow_html=True)
 
+# Display chat history
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"], avatar="🧑" if msg["role"] == "user" else "🕊️"):
         st.markdown(msg["content"])
@@ -127,13 +147,16 @@ for msg in st.session_state.chat_history:
                 for i, src in enumerate(msg["sources"][:2], 1):
                     st.markdown(f'<div class="source-card"><span class="source-label">📌 Source {i}</span>{src[:200]}...</div>', unsafe_allow_html=True)
 
+# Clear button
 if st.session_state.chat_history:
     col1, col2, col3 = st.columns([4, 1, 1])
     with col3:
         if st.button("🗑️ Clear", key="clear"):
             st.session_state.chat_history = []
+            st.session_state.lc_history = []
             st.rerun()
 
+# Input
 user_input = st.chat_input("Ask anything about NayePankh Foundation...")
 question = user_input or st.session_state.pop("quick_question", None)
 
@@ -148,10 +171,11 @@ if question:
         placeholder = st.empty()
         placeholder.markdown("🔍 *Searching knowledge base...*")
         try:
-            chain, retriever = load_chain()
-            docs = retriever.invoke(question)
-            sources = [doc.page_content for doc in docs]
-            answer = chain.invoke(question)
+            # Pass last 6 messages as memory (3 turns)
+            answer, sources = get_answer(
+                question,
+                st.session_state.lc_history[-6:]
+            )
 
             placeholder.empty()
             typed = ""
@@ -169,11 +193,22 @@ if question:
                     for i, src in enumerate(sources[:2], 1):
                         st.markdown(f'<div class="source-card"><span class="source-label">📌 Source {i}</span>{src[:200]}...</div>', unsafe_allow_html=True)
 
-            st.session_state.chat_history.append({"role": "assistant", "content": answer, "sources": sources})
+            # Update both histories
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": answer,
+                "sources": sources
+            })
+            # Update LangChain memory
+            st.session_state.lc_history.append(HumanMessage(content=question))
+            st.session_state.lc_history.append(AIMessage(content=answer))
 
         except Exception as e:
             placeholder.empty()
             st.error(f"Error: {str(e)}")
-            st.session_state.chat_history.append({"role": "assistant", "content": "Sorry, something went wrong. Please try again!"})
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": "Sorry, something went wrong. Please try again!"
+            })
 
 st.markdown('<div class="footer">Built with LangChain · Groq LLaMA 3 · ChromaDB · <a href="https://nayepankh.com" target="_blank">nayepankh.com</a></div>', unsafe_allow_html=True)
