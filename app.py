@@ -4,15 +4,16 @@ import streamlit as st
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_groq import ChatGroq
-from langchain_community.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains import create_retrieval_chain
 from dotenv import load_dotenv
 
 load_dotenv()
 
 VECTORSTORE_DIR = "vectorstore"
 EMBED_MODEL     = "all-MiniLM-L6-v2"
-GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_MODEL      = "llama-3.1-8b-instant"
 
 PROMPT_TEMPLATE = """You are a helpful and warm assistant for NayePankh Foundation, a registered Indian NGO that uplifts underprivileged people through food, clothes, sanitary pads, and education.
 
@@ -21,7 +22,7 @@ Use the following context to answer the question accurately and warmly. If the a
 Context:
 {context}
 
-Question: {question}
+Input: {input}
 
 Answer:"""
 
@@ -46,15 +47,10 @@ def load_chain():
     )
     prompt = PromptTemplate(
         template=PROMPT_TEMPLATE,
-        input_variables=["context", "question"]
+        input_variables=["context", "input"]
     )
-    chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=retriever,
-        return_source_documents=True,
-        chain_type_kwargs={"prompt": prompt}
-    )
+    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
+    chain = create_retrieval_chain(retriever, combine_docs_chain)
     return chain
 
 st.set_page_config(page_title="NayePankh Chatbot", page_icon="🕊️", layout="centered")
@@ -159,9 +155,9 @@ if question:
         placeholder.markdown("🔍 *Searching knowledge base...*")
         try:
             chain = load_chain()
-            result = chain.invoke({"query": question})
-            answer = result["result"]
-            sources = [doc.page_content for doc in result.get("source_documents", [])]
+            result = chain.invoke({"input": question})
+            answer = result["answer"]
+            sources = [doc.page_content for doc in result.get("context", [])]
 
             placeholder.empty()
             typed = ""
